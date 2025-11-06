@@ -1,61 +1,24 @@
 @echo off
-set "APP_NAME=BlackNode-Clipper"
-set "ENTRY_POINT=main.py"
+echo Starting Nuitka build for BlackNode-Clipper...
 
-echo Starting Nuitka build for %APP_NAME%...
-
-REM تفعيل البيئة الافتراضية (افترض أنك في نفس المجلد)
-call venv\Scripts\activate
-
-REM [هام]: استخدام امر Nuitka مع تفعيل جميع الإضافات اللازمة 
-REM - --plugin-enable=pyside6: لدعم واجهة PySide6
-REM - --plugin-enable=numpy & opencv: لدمج مكتبة OpenCV بشكل صحيح
-REM - --include-data-dir: لضم مجلد modules
-REM - --include-data-file: لضم ملف config.yaml
-REM - --windows-disable-console: لإخفاء نافذة الطرفية السوداء عند التشغيل
-REM - --onefile: لإنشاء ملف تنفيذي واحد (اختياري، يمكنك حذفه واستخدام --standalone فقط)
+:: This command builds the application as a single executable file, 
+:: compiling with MinGW64 and including all necessary dependencies.
 
 python -m nuitka ^
-    --standalone ^
-    --onefile ^
-    --output-dir=dist ^
-    --mingw64 ^
-    --windows-disable-console ^
-    --follow-imports ^
-    --plugin-enable=pyside6 ^
-    --plugin-enable=numpy ^
-    --plugin-enable=opencv ^
-    --include-data-dir=modules=modules ^
-    --include-data-file=config.yaml=config.yaml ^
-    --output-filename=%APP_NAME% ^
-    "%ENTRY_POINT%"
+--output-filename=BlackNodeClipper ^
+--mingw64 ^
+--standalone ^
+--onefile ^
+--windows-icon-from-ico=assets/icon.ico ^
+--output-dir=dist ^
+--remove-output ^
+--assume-yes-for-downloads ^
+--plugin-enable=pyside6 ^
+--plugin-enable=numpy ^
+--include-package=modules ^
+--include-data-dir=assets=assets ^
+--include-data-file=config.yaml=config.yaml ^
+main.py
 
-if %ERRORLEVEL% equ 0 (
-    echo.
-    echo -----------------------------------------------------------------------
-    echo ✅ تم البناء بنجاح! الملف التنفيذي موجود في مجلد "dist".
-    echo -----------------------------------------------------------------------
-    
-    REM === تعليمات هامة حول FFmpeg و VLC ===
-    echo.
-    echo ⚠️ خطوات هامة بعد البناء (يجب تنفيذها يدويا):
-    
-    REM بما أنك وضعت ffmpeg.exe و ffprobe.exe بجوار main.py، سيتم نقلهم الآن الى مجلد dist
-    copy ffmpeg.exe dist\
-    copy ffprobe.exe dist\
-    echo 1. تم نسخ ffmpeg.exe و ffprobe.exe الى مجلد "dist".
-    
-    echo 2. يجب نسخ مكتبات VLC الإضافية (مثل plugins) يدوياً الى مجلد "dist" اذا لم يعمل تشغيل الفيديو.
-    echo -----------------------------------------------------------------------
-
-) else (
-    echo.
-    echo ❌ فشل عملية البناء! الرجاء مراجعة الأخطاء في الإخراج.
-)
-
-REM إلغاء تفعيل البيئة الافتراضية
-deactivate
-
-echo.
-echo انتهى سكريبت البناء.
+echo Build complete.
 pause
