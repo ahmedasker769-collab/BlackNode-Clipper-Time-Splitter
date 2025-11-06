@@ -1,0 +1,6 @@
+# requirements.txt
+
+PySide6
+python-vlc
+pyyaml
+opencv-python

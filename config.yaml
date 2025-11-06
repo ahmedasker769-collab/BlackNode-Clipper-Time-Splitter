@@ -1,0 +1,25 @@
+# config.yaml
+
+# Default video output settings
+output_settings:
+  # Default duration for automatic splitting in seconds
+  default_segment_duration_seconds: 10
+  # Default output resolution
+  resolution: 1080p
+  # Recommended video bitrate
+  video_bitrate: "5000k"
+  # Video codec (H.264 is the most common)
+  video_codec: "libx264"
+
+# System and location settings
+system_settings:
+  # Path to override FFmpeg location if it's not in the system's PATH
+  # (Leave empty to use system PATH automatically)
+  ffmpeg_path_override: "" 
+  # Default folder name for saving clipped output
+  default_output_folder_name: "Clipped_Videos"
+  
+# FFmpeg/FFprobe executable names (expected to be in the same folder as the app)
+ffmpeg_paths:
+  ffmpeg: ffmpeg
+  ffprobe: ffprobe
