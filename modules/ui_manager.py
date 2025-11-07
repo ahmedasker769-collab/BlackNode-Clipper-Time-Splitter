@@ -79,17 +79,21 @@ class ClipItemWidget(QWidget):
 # ***************************************************************
 
 class VideoClipperPanel(QWidget):
-    clips_confirmed = Signal(list)
+    # UPDATED SIGNAL: Now sends list of clips and the selected format data (dict)
+    clips_confirmed = Signal(list, dict) 
     back_requested = Signal()
     
     SEGMENT_COLORS = [QColor(255,105,180,150), QColor(100,149,237,150), QColor(60,179,113,150), QColor(255,165,0,150), QColor(147,112,219,150)]
 
-    def __init__(self, ffmpeg_path, ffprobe_path, default_output_folder, parent=None):
+    # UPDATED __init__: Accepts supported_formats and default_format_name
+    def __init__(self, ffmpeg_path, ffprobe_path, default_output_folder, supported_formats, default_format_name, parent=None):
         super().__init__(parent)
         
         self.ffmpeg_path = ffmpeg_path
         self.ffprobe_path = ffprobe_path
         self.default_output_folder = default_output_folder
+        self.supported_formats = supported_formats
+        self.default_format_name = default_format_name
         
         self.video_path = None
         self.clips = []
@@ -107,10 +111,9 @@ class VideoClipperPanel(QWidget):
         self.timer.setInterval(100)
         self._connect_signals()
         
-        self._save_state() # Save initial empty state
+        self._save_state()
 
     def _setup_ui(self):
-        # [Fix: Layout Spacing] Reduced main vertical spacing
         self.main_layout.setSpacing(5) 
         self.main_layout.setContentsMargins(10, 10, 10, 10)
         
@@ -123,37 +126,32 @@ class VideoClipperPanel(QWidget):
         content_layout = QHBoxLayout()
         content_layout.setSpacing(10)
         
-        # Video Section Layout (to hold player, slider, and controls)
         video_section_widget = QWidget()
         video_section_layout = QVBoxLayout(video_section_widget) 
         video_section_layout.setContentsMargins(0, 0, 0, 0)
-        video_section_layout.setSpacing(5) # Reduced spacing between vertical elements
+        video_section_layout.setSpacing(5)
         
-        # Player Container (QFrame for styling and aspect control)
         player_container = QFrame()
         player_container.setObjectName("PlayerContainer")
         player_container_layout = QVBoxLayout(player_container)
         player_container_layout.setContentsMargins(0, 0, 0, 0)
         
-        # Player Widget
         self.player_widget = PlayerWidget(self)
         player_container_layout.addWidget(self.player_widget)
         
-        # Slider
         self.video_slider = MarkerSlider(Qt.Orientation.Horizontal) 
         self.video_slider.setRange(0, 1000) 
         self.video_slider.setObjectName("VideoSlider")
         
-        video_section_layout.addWidget(player_container) 
-        video_section_layout.addWidget(self.video_slider) 
+        video_section_layout.addWidget(player_container, 5) 
+        video_section_layout.addWidget(self.video_slider, 1) 
         
         # ----------------------------------------------------
         # Controls Layout (with Undo/Redo)
         # ----------------------------------------------------
         controls_layout = QHBoxLayout()
-        controls_layout.setContentsMargins(0, 5, 0, 0) # Reduced bottom padding for tight fit
+        controls_layout.setContentsMargins(0, 5, 0, 0)
         
-        # Undo/Redo buttons
         self.undo_button = QPushButton("↩") 
         self.redo_button = QPushButton("↪")
         self.undo_button.setObjectName("UndoRedoButton")
@@ -161,7 +159,6 @@ class VideoClipperPanel(QWidget):
         self.undo_button.setToolTip("Undo Last Clip Action (Ctrl+Z)")
         self.redo_button.setToolTip("Redo Last Clip Action (Ctrl+Y)")
         
-        # Playback control buttons
         self.rewind_button = QPushButton("⏪︎") 
         self.play_pause_button = QPushButton("▶") 
         self.stop_button = QPushButton("⏹️") 
@@ -171,7 +168,6 @@ class VideoClipperPanel(QWidget):
         self.speed_combo.addItems(["0.5x", "0.75x", "1x", "1.5x", "2x"]) 
         self.speed_combo.setCurrentText("1x")
         
-        # Button arrangement
         controls_layout.addWidget(self.undo_button)
         controls_layout.addWidget(self.redo_button)
         controls_layout.addSpacing(15)
@@ -186,22 +182,34 @@ class VideoClipperPanel(QWidget):
         
         self.time_label = QLabel("00:00.00 / 00:00.00") 
         controls_layout.addWidget(self.time_label)
-        video_section_layout.addLayout(controls_layout) 
         
-        # Second Control Bar (Marking)
+        video_section_layout.addLayout(controls_layout, 1) 
+        
+        # Second Control Bar (Marking and Format Selection)
         sub_controls_layout = QHBoxLayout() 
-        sub_controls_layout.setContentsMargins(0, 5, 0, 0) # Reduced bottom padding for tight fit
+        sub_controls_layout.setContentsMargins(0, 5, 0, 0)
+        
+        # --- Format Selection Group ---
+        format_group_layout = QHBoxLayout()
+        format_group_layout.addWidget(QLabel("Output Format:"))
+        self.format_combo = QComboBox()
+        self.format_combo.addItems([f['name'] for f in self.supported_formats])
+        self.format_combo.setCurrentText(self.default_format_name)
+        format_group_layout.addWidget(self.format_combo)
+        sub_controls_layout.addLayout(format_group_layout)
+        sub_controls_layout.addStretch() 
+        
         self.start_clip_button = QPushButton("🔽 Mark Start") 
         self.end_clip_button = QPushButton("🔼 Mark End & Add") 
         self.auto_split_button = QPushButton("✨ Auto-Split...") 
         self.end_clip_button.setObjectName("AddButton") 
-        sub_controls_layout.addStretch() 
+        
         sub_controls_layout.addWidget(self.auto_split_button) 
         sub_controls_layout.addWidget(self.start_clip_button) 
         sub_controls_layout.addWidget(self.end_clip_button) 
-        video_section_layout.addLayout(sub_controls_layout)
         
-        # Video section takes 3/4 horizontal space, list takes 1/4
+        video_section_layout.addLayout(sub_controls_layout, 1)
+        
         content_layout.addWidget(video_section_widget, 3) 
         
         clip_list_section_layout = QVBoxLayout() 
@@ -209,7 +217,8 @@ class VideoClipperPanel(QWidget):
         self.clip_list_widget = QListWidget() 
         clip_list_section_layout.addWidget(self.clip_list_widget) 
         content_layout.addLayout(clip_list_section_layout, 1) 
-        self.main_layout.addLayout(content_layout)
+        
+        self.main_layout.addLayout(content_layout, 1) 
         
         bottom_bar = QHBoxLayout() 
         self.back_button = QPushButton("⬅️ Back") 
@@ -315,8 +324,14 @@ class VideoClipperPanel(QWidget):
             if not params: return
 
             QApplication.setOverrideCursor(Qt.WaitCursor)
+            
+            generated_clips_data = None
             try:
                 generated_clips_data, _ = generate_clip_timestamps(self.video_path, params, self.ffprobe_path)
+            except Exception as e:
+                logger.error(f"Error during auto-split calculation: {e}", exc_info=True)
+                QMessageBox.critical(self, "Auto-Split Error", 
+                                     f"Failed to calculate clips. Check if FFprobe path is correct. Details: {e}")
             finally: 
                 QApplication.restoreOverrideCursor()
             
@@ -324,7 +339,7 @@ class VideoClipperPanel(QWidget):
                 self.clips.clear()
                 self.clip_list_widget.clear() 
                 [self.add_clip_to_list(c['start'], c['end'], save_history=False) for c in generated_clips_data]
-                self._save_state() # Save history once for all auto-split clips
+                self._save_state()
             
     def confirm_clips(self):
         if not self.clips:
@@ -332,7 +347,15 @@ class VideoClipperPanel(QWidget):
             return
             
         self.stop_video()
-        self.clips_confirmed.emit(self.clips)
+        
+        selected_format_name = self.format_combo.currentText()
+        selected_format_data = next((f for f in self.supported_formats if f['name'] == selected_format_name), None)
+        
+        if not selected_format_data:
+            QMessageBox.critical(self, "Configuration Error", "Selected output format is invalid.")
+            return
+
+        self.clips_confirmed.emit(self.clips, selected_format_data)
         
     def add_clip_to_list(self, start_ms, end_ms, save_history=True): 
         clip = {'start': int(start_ms), 'end': int(end_ms)}
@@ -355,7 +378,6 @@ class VideoClipperPanel(QWidget):
             self.clips.pop(index_to_remove)
         self.clip_list_widget.takeItem(index_to_remove)
         
-        # Re-sync widget indices and labels after removal
         for i in range(self.clip_list_widget.count()):
             item = self.clip_list_widget.item(i)
             widget = self.clip_list_widget.itemWidget(item)
@@ -391,7 +413,7 @@ class VideoClipperPanel(QWidget):
                 self.reset_clip_buttons()
             else:
                 QMessageBox.warning(self, "Invalid Clip", "End time must be after the start time.")
-                self.reset_clip_buttons() # Reset both if invalid
+                self.reset_clip_buttons() 
                 
         self.update_markers()
         
@@ -457,7 +479,7 @@ class VideoClipperPanel(QWidget):
         return f"{m:02d}:{s:02d}.{int(ms_rem/10):02d}"
 
     # ***************************************************************
-    # Undo/Redo History Management Functions
+    # Undo/Redo History Management Functions 
     # ***************************************************************
     
     def _save_state(self):

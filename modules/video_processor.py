@@ -34,130 +34,105 @@ def get_video_duration(video_path, ffprobe_path):
     ]
     
     try:
-        # Check if ffprobe path is absolute, otherwise assume it's in PATH
-        executable = ffprobe_path if Path(ffprobe_path).is_absolute() else 'ffprobe'
+        # Check if ffprobe exists before running
+        subprocess.run([ffprobe_path, '-version'], check=True, capture_output=True)
         
-        result = subprocess.run(
-            [executable, *command[1:]],
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding='utf-8'
-        )
+        result = subprocess.run(command, check=True, capture_output=True, text=True, encoding='utf-8')
         duration = float(result.stdout.strip())
-        logger.info(f"Video duration detected: {duration} seconds.")
         return duration
-    except subprocess.CalledProcessError as e:
-        logger.error(f"FFprobe failed to get duration for {video_path}. Error: {e.stderr}")
-        return 0.0
     except FileNotFoundError:
-        logger.critical(f"FFprobe not found at '{ffprobe_path}' or in PATH.")
-        return 0.0
+        logger.error(f"FFprobe executable not found at {ffprobe_path}. Please check config.yaml or PATH.")
+        return 0
+    except subprocess.CalledProcessError as e:
+        logger.error(f"FFprobe execution failed: {e.stderr}", exc_info=True)
+        return 0
     except Exception as e:
-        logger.error(f"Error getting video duration: {e}", exc_info=True)
-        return 0.0
+        logger.error(f"An unexpected error occurred during ffprobe execution: {e}", exc_info=True)
+        return 0
 
 def generate_clip_timestamps(video_path, params, ffprobe_path):
-    """Generates clip start/end timestamps based on auto-split parameters."""
-    duration_s = get_video_duration(video_path, ffprobe_path)
-    if duration_s <= 0:
-        return [], 0
-        
-    duration_ms = duration_s * 1000
+    # ... (unchanged logic) ...
+    # ... (function body remains the same) ...
+    duration_sec = get_video_duration(video_path, ffprobe_path)
+    if duration_sec <= 0:
+        raise Exception("Could not determine video duration.")
+
+    duration_ms = duration_sec * 1000
+    
     clips = []
     
     if params['mode'] == 'duration':
-        split_duration_ms = params['value'] * 1000
-        start_ms = 0
-        while start_ms < duration_ms:
-            end_ms = min(start_ms + split_duration_ms, duration_ms)
-            clips.append({'start': start_ms, 'end': end_ms})
-            start_ms = end_ms # Move to the next start time
+        segment_ms = params['value'] * 1000
+        start = 0
+        while start < duration_ms:
+            end = min(start + segment_ms, duration_ms)
+            clips.append({'start': int(start), 'end': int(end)})
+            start = end
             
     elif params['mode'] == 'number':
         num_clips = params['value']
         if num_clips > 0:
-            clip_length_ms = duration_ms / num_clips
+            segment_ms = duration_ms / num_clips
             for i in range(num_clips):
-                start_ms = i * clip_length_ms
-                end_ms = min((i + 1) * clip_length_ms, duration_ms)
-                # Ensure we don't create extremely short clips at the end due to float issues
-                if end_ms - start_ms > 10: # Minimum 10ms length
-                    clips.append({'start': start_ms, 'end': end_ms})
-                    
-    return clips, duration_s
+                start = i * segment_ms
+                end = min((i + 1) * segment_ms, duration_ms)
+                clips.append({'start': int(start), 'end': int(end)})
 
-def get_output_filename(base_path, original_filename, clip_index, start_ms, end_ms, suffix="clip"):
-    """
-    Generates a unique, descriptive output filename for the clip.
-    Example: 720_clip_01_00-00-05_to_00-00-10.mp4
-    """
-    original_name = Path(original_filename).stem
-    original_ext = Path(original_filename).suffix
-    
-    # Format time strings for the filename
-    # We use a cleaner format for filenames (m-s-ms)
-    def format_time(ms):
-        s, ms_rem = divmod(int(ms), 1000)
-        m, s = divmod(s, 60)
-        return f"{m:02d}-{s:02d}.{int(ms_rem/10):02d}" # M-S.MS
-    
-    start_time_str = format_time(start_ms).replace('.', '_')
-    end_time_str = format_time(end_ms).replace('.', '_')
-    
-    # Simple and clear filename format: OriginalName_Clip_Index_StartTime_to_EndTime.ext
-    filename = f"{original_name}_{suffix}_{clip_index:02d}_{start_time_str}_to_{end_time_str}{original_ext}"
-    
-    # Ensure filename is safe 
-    filename = re.sub(r'[^\w\-_\.]', '_', filename)
-    
-    return str(Path(base_path) / filename)
+    return clips, duration_ms
 
+# UPDATED: Added 'extension' argument
+def get_output_filename(base_path, original_filename, clip_index, start_ms, end_ms, extension):
+    """Generates a unique, timestamped output filename with the correct extension."""
+    
+    # 1. Sanitize the original filename for safety
+    base_name = re.sub(r'[^\w\-_\.]', '_', Path(original_filename).stem)
+    
+    # Format timestamps for clarity
+    start_str = ms_to_ffmpeg_time(start_ms).replace(':', '-').replace('.', '_')
+    end_str = ms_to_ffmpeg_time(end_ms).replace(':', '-').replace('.', '_')
+    
+    # 2. Append clip details and correct extension
+    output_filename = f"{base_name}_clip_{clip_index:02d}_{start_str}_{end_str}.{extension}"
+    
+    # 3. Build the full path
+    output_path = Path(base_path) / output_filename
+    return str(output_path)
 
-def get_ffmpeg_split_commands(video_path, clips, output_folder, ffprobe_path, ffmpeg_path, config):
+# UPDATED: Replaced individual codec parameters with 'format_data' dict
+def get_ffmpeg_split_commands(video_path, output_folder, clips, ffmpeg_executable, format_data):
     """
-    Generates the list of FFmpeg command dictionaries required for splitting.
-    
-    Returns:
-    A list of dictionaries, where each dict has:
-    - 'command': The full list of command arguments (to be executed by subprocess.run).
-    - 'output_path': The final expected path of the output file.
+    Generates a list of FFmpeg commands to split the video based on clip data and format settings.
     """
-    commands_list = []
+    if not clips:
+        return []
+
+    original_filename = Path(video_path).name # Get full name including extension
     
-    # Ensure output directory exists
-    ensure_folder(output_folder)
+    # Extract format-specific data
+    extension = format_data['extension']
+    vcodec = format_data['video_codec']
+    acodec = format_data['audio_codec']
+    options = format_data.get('options', [])
     
-    # Get original filename for naming convention
-    original_filename = Path(video_path).name
-    
-    # FFmpeg execution path (used in the command list)
-    ffmpeg_executable = ffmpeg_path if Path(ffmpeg_path).is_absolute() else 'ffmpeg'
-    
-    # Determine encoding settings (using copy for fastest processing)
-    codec = config.get('ffmpeg_settings', {}).get('codec', 'copy') 
+    commands = []
     
     for i, clip in enumerate(clips):
+        # Calculate start and duration
         start_time_str = ms_to_ffmpeg_time(clip['start'])
         duration_ms = clip['end'] - clip['start']
-        
-        if duration_ms <= 0:
-            logger.warning(f"Skipping clip {i+1}: duration is zero or negative.")
-            continue
-            
         duration_time_str = ms_to_ffmpeg_time(duration_ms)
         
-        # 1. Generate the required output path (Crucial for the fix)
+        # 1. Generate the required output path
         output_path = get_output_filename(
             base_path=output_folder,
             original_filename=original_filename,
             clip_index=i + 1,
             start_ms=clip['start'],
-            end_ms=clip['end']
+            end_ms=clip['end'],
+            extension=extension # Pass the dynamic extension
         )
         
         # 2. Build the FFmpeg command
-        # Use input seeking (-ss before -i) for speed and duration (-to)
         command = [
             ffmpeg_executable,
             '-ss', start_time_str,      # Seek to start position
@@ -165,15 +140,21 @@ def get_ffmpeg_split_commands(video_path, clips, output_folder, ffprobe_path, ff
             '-to', duration_time_str,   # Duration (or end time)
         ]
         
-        if codec == 'copy':
+        # Add format-specific codecs and options
+        if vcodec == 'copy' and acodec == 'copy':
             command.extend(['-c', 'copy']) # Fast, lossless copy of streams
         else:
-            # Placeholder for re-encoding logic if needed
-            command.extend([
-                '-c:v', 'libx264',
-                '-crf', '23',
-                '-c:a', 'aac'
-            ])
+            # Video codec
+            command.extend(['-c:v', vcodec])
+            
+            # Audio codec
+            if acodec == 'an': # No audio
+                command.extend(['-an'])
+            else:
+                command.extend(['-c:a', acodec])
+                
+            # Additional options (e.g., CRF, bitrate, pixel format)
+            command.extend(options)
 
         # Final output path and necessary flags
         command.extend([
@@ -182,10 +163,7 @@ def get_ffmpeg_split_commands(video_path, clips, output_folder, ffprobe_path, ff
             output_path
         ])
         
-        # 3. Return the necessary dictionary structure (KeyError fix)
-        commands_list.append({
-            'command': command,
-            'output_path': output_path
-        })
+        # 3. Return the necessary dictionary structure
+        commands.append({'command': command, 'output_file': output_path})
         
-    return commands_list
+    return commands

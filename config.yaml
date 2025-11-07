@@ -6,11 +6,34 @@ output_settings:
   default_segment_duration_seconds: 10
   # Default output resolution
   resolution: 1080p
-  # Recommended video bitrate
-  video_bitrate: "5000k"
-  # Video codec (H.264 is the most common)
-  video_codec: "libx264"
+  # Recommended video bitrate (This might be overridden by format options below)
+  video_bitrate: "5000k" 
+  # Default selected output format name 
+  default_output_format: "MP4 (H.264)" 
 
+# List of supported output formats and their FFmpeg settings
+supported_formats:
+  - name: "MP4 (H.264)"
+    extension: "mp4"
+    video_codec: "libx264"
+    audio_codec: "aac"
+    options: ["-crf", "23", "-pix_fmt", "yuv420p"]
+  - name: "WebM (VP9)"
+    extension: "webm"
+    video_codec: "libvpx-vp9"
+    audio_codec: "libopus"
+    options: ["-crf", "30", "-b:v", "0"] # VBR settings
+  - name: "GIF (No Audio)"
+    extension: "gif"
+    video_codec: "gif"
+    audio_codec: "an" # Disable audio
+    options: ["-r", "15"] # Low frame rate
+  - name: "Stream Copy (Original Format)"
+    extension: "mp4" 
+    video_codec: "copy"
+    audio_codec: "copy"
+    options: []
+    
 # System and location settings
 system_settings:
   # Path to override FFmpeg location if it's not in the system's PATH

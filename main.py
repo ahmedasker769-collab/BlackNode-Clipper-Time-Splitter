@@ -4,16 +4,16 @@ import sys
 import os
 import yaml
 import logging
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QFileDialog, QMessageBox, QPushButton, QLineEdit,
-                               QHBoxLayout, QLabel, QProgressDialog, QGridLayout)
+from PySide6.QtWidgets import (QApplication, QMainWindow, QMessageBox, QProgressDialog,
+                               QStackedWidget) 
 from PySide6.QtCore import QThread, Signal, Qt
 from pathlib import Path
 
-# Import custom components (Fixed imports)
+# Import custom components 
 from modules.ui_manager import VideoClipperPanel
 from modules.workers import VideoSplitterWorker
 from modules.video_processor import ensure_folder
+from modules.file_selector_panel import VideoSelectorPanel 
 
 # Setup the Logger
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -24,254 +24,230 @@ logger = logging.getLogger("BlackNode-Clipper.Main")
 # ***************************************************************
 
 CONFIG_FILE = "config.yaml"
-OUTPUT_FOLDER = "clipped_output" 
-STYLE_FILE = "style.css" # File to load the custom theme
+STYLE_FILE = "style.css" 
 
 def load_config(file_path):
     """
     Loads configuration from config.yaml, ensuring UTF-8 encoding. 
     If file does not exist, creates a default one.
     """
-    # Default minimum configuration for safety
     default_config = {
         'ffmpeg_paths': {'ffmpeg': 'ffmpeg', 'ffprobe': 'ffprobe'},
-        'system_settings': {'default_output_folder_name': 'clipped_output'}
+        'system_settings': {'default_output_folder_name': 'clipped_output'},
+        'output_settings': {
+            'default_segment_duration_seconds': 10,
+            'resolution': '1080p',
+            'video_bitrate': '5000k',
+            'default_output_format': 'MP4 (H.264)', 
+        },
+        'supported_formats': [
+            {'name': 'MP4 (H.264)', 'extension': 'mp4', 'video_codec': 'libx264', 'audio_codec': 'aac', 'options': ['-crf', '23', '-pix_fmt', 'yuv420p']},
+            {'name': 'WebM (VP9)', 'extension': 'webm', 'video_codec': 'libvpx-vp9', 'audio_codec': 'libopus', 'options': ['-crf', '30', '-b:v', '0']},
+            {'name': 'GIF (No Audio)', 'extension': 'gif', 'video_codec': 'gif', 'audio_codec': 'an', 'options': ['-r', '15']},
+            {'name': 'Stream Copy (Original Format)', 'extension': 'mp4', 'video_codec': 'copy', 'audio_codec': 'copy', 'options': []}
+        ]
     }
-    
-    if not os.path.exists(file_path):
-        # Create default config if missing (with UTF-8)
-        try:
-            with open(file_path, 'w', encoding='utf-8') as f:
-                yaml.dump(default_config, f, sort_keys=False)
-            logger.warning(f"Created default '{file_path}'. Please verify FFmpeg/FFprobe paths.")
-        except Exception as e:
-            logger.error(f"Error creating default config file: {e}")
-        return default_config
-        
+
     try:
-        # Load config with explicit UTF-8 encoding to prevent 'charmap' errors
-        with open(file_path, 'r', encoding='utf-8') as f:
-            loaded_config = yaml.safe_load(f)
+        if os.path.exists(file_path):
+            with open(file_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
             
-            # Merge with defaults to ensure all keys are present
-            if loaded_config:
-                final_config = default_config.copy()
-                final_config.update(loaded_config)
-                return final_config
+            for key, default_value in default_config.items():
+                if key not in config:
+                    config[key] = default_value
+                elif isinstance(default_value, dict) and isinstance(config[key], dict):
+                    config[key] = {**default_value, **config[key]}
+
+            if not config.get('supported_formats'):
+                config['supported_formats'] = default_config['supported_formats']
+
+            return config
+        else:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                yaml.dump(default_config, f, allow_unicode=True, sort_keys=False)
+            logger.warning(f"Configuration file {file_path} not found. Default configuration created.")
             return default_config
             
     except Exception as e:
-        logger.critical(f"Error loading config file '{file_path}'. Using defaults. Error: {e}")
+        logger.error(f"Error loading/creating config file: {e}. Using internal defaults.", exc_info=True)
         return default_config
 
+
 # ***************************************************************
-# MAIN WINDOW CLASS (Correctly placed before the execution block)
+# MAIN WINDOW CLASS
 # ***************************************************************
 
 class MainWindow(QMainWindow):
-    """
-    Main application window managing video selection, configuration,
-    and launching the clipping/processing panel.
-    """
-    def __init__(self, config):
-        super().__init__()
+    def __init__(self, config_data, parent=None):
+        super().__init__(parent)
         self.setWindowTitle("BlackNode Video Clipper")
-        self.setGeometry(100, 100, 1200, 800)
+        self.setMinimumSize(800, 600)
         
-        self.config = config
+        self.config_data = config_data 
         
-        # Handle paths and output folder dynamically from config
-        self.ffmpeg_path = config['ffmpeg_paths']['ffmpeg']
-        self.ffprobe_path = config['ffmpeg_paths']['ffprobe']
-        self.output_folder_name = config.get('system_settings', {}).get('default_output_folder_name', OUTPUT_FOLDER)
+        self.video_path = None
         
-        self.source_video_path = None
-        self.splitter_thread = None
-        self.splitter_worker = None
+        # UI components: Use QStackedWidget to manage panels
+        self.main_stack = QStackedWidget(self)
+        self.setCentralWidget(self.main_stack)
         
-        self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
-        self.layout = QVBoxLayout(self.central_widget)
+        # 1. Setup Selector Panel (Index 0: Default Start Screen)
+        self.selector_panel = VideoSelectorPanel()
+        self.selector_panel.video_selected.connect(self.load_clipper_panel) 
+        self.main_stack.addWidget(self.selector_panel)
         
-        # 1. Setup the Video Input Bar
-        self._setup_input_bar()
+        # 2. Clipper Panel (Created later when a file is selected)
+        self.clipper_panel = None
         
-        # 2. Setup the Clipping Panel
-        self.clipper_panel = VideoClipperPanel(
-            ffmpeg_path=self.ffmpeg_path, 
-            ffprobe_path=self.ffprobe_path,
-            default_output_folder=self.output_folder_name
-        )
-        self.layout.addWidget(self.clipper_panel)
-        self.clipper_panel.setEnabled(False)
+        # Processing setup
+        self.worker = None
+        self.thread = None
+        self.progress_dialog = None
         
-        self._connect_signals()
-        
-        logger.info(f"FFmpeg Path: {self.ffmpeg_path} | FFprobe Path: {self.ffprobe_path}")
-        logger.info("Application is running. Ready for video selection.")
+        self.main_stack.setCurrentWidget(self.selector_panel)
 
-    def _setup_input_bar(self):
-        """Creates the visually attractive input section, setting objectName for styling."""
-        input_widget = QWidget()
-        input_layout = QHBoxLayout(input_widget)
-        input_layout.setContentsMargins(10, 10, 10, 10)
+    def load_clipper_panel(self, video_path):
+        """Initializes the clipper panel with the selected video and switches the view."""
         
-        # Style improvements: using clearer labels and buttons
-        input_layout.addWidget(QLabel("🎥 Video Source:"))
-        
-        self.video_path_line = QLineEdit()
-        self.video_path_line.setPlaceholderText("Select source video file (e.g., C:/Videos/source.mp4)...")
-        self.video_path_line.textChanged.connect(self._handle_video_path_change)
-        input_layout.addWidget(self.video_path_line)
-        
-        self.select_video_button = QPushButton("Browse...")
-        self.select_video_button.setObjectName("browseButton") # Crucial for CSS styling
-        self.select_video_button.clicked.connect(self._open_file_dialog)
-        input_layout.addWidget(self.select_video_button)
-        
-        self.layout.addWidget(input_widget)
-
-    def _connect_signals(self):
-        self.clipper_panel.clips_confirmed.connect(self.start_splitting)
-        self.clipper_panel.back_requested.connect(self._handle_back_request)
-
-    def _handle_video_path_change(self, path):
-        """Validates the path and loads the video into the clipper panel."""
-        if os.path.exists(path) and Path(path).suffix.lower() in ['.mp4', '.mkv', '.avi', '.mov', '.webm']:
-            self.source_video_path = path
-            self.clipper_panel.load_video(self.source_video_path)
-            self.clipper_panel.setEnabled(True)
-            logger.info(f"Loaded video: {path}")
-        else:
-            self.clipper_panel.setEnabled(False)
-            # Ensure player is released if path is invalid
-            if hasattr(self.clipper_panel, 'player_widget') and self.clipper_panel.player_widget is not None:
-                self.clipper_panel.player_widget.release_player()
-            if path:
-                logger.warning(f"Path is not a valid video file: {path}")
-
-    def _open_file_dialog(self):
-        """Opens a file dialog to select the video."""
-        path, _ = QFileDialog.getOpenFileName(
-            self, 
-            "Select Video File", 
-            "", 
-            "Video Files (*.mp4 *.mkv *.avi *.mov *.webm)"
-        )
-        if path:
-            self.video_path_line.setText(path)
+        if self.clipper_panel is None:
             
-    def _handle_back_request(self):
-        """Handles cleanup when the user requests to go back (in future updates)."""
-        logger.info("Clipper panel requested back. Cleaning up.")
-        if hasattr(self.clipper_panel, 'player_widget') and self.clipper_panel.player_widget is not None:
-            self.clipper_panel.player_widget.release_player()
-        self.video_path_line.clear() # Clear line to reset state
+            ffmpeg_path = self.config_data['ffmpeg_paths']['ffmpeg']
+            ffprobe_path = self.config_data['ffmpeg_paths']['ffprobe']
+            default_folder = self.config_data['system_settings']['default_output_folder_name']
+            
+            supported_formats = self.config_data.get('supported_formats', [])
+            default_format_name = self.config_data['output_settings']['default_output_format']
+            
+            self.clipper_panel = VideoClipperPanel(
+                ffmpeg_path=ffmpeg_path,
+                ffprobe_path=ffprobe_path,
+                default_output_folder=default_folder,
+                supported_formats=supported_formats, 
+                default_format_name=default_format_name
+            )
+            
+            self.clipper_panel.clips_confirmed.connect(self.start_processing)
+            self.clipper_panel.back_requested.connect(self.unload_clipper_panel) 
+            
+            self.main_stack.addWidget(self.clipper_panel)
+            
+        self.video_path = video_path
+        self.clipper_panel.load_video(video_path)
+        self.main_stack.setCurrentWidget(self.clipper_panel)
+
+    def unload_clipper_panel(self):
+        """Stops the player and switches back to the selector screen."""
+        if self.clipper_panel:
+            self.clipper_panel.stop_video()
+        self.main_stack.setCurrentWidget(self.selector_panel)
+        self.video_path = None
+
+    # تم تعديل ترتيب إشارات الربط هنا لمنع تجميد الواجهة بعد انتهاء المعالجة
+    def start_processing(self, clips, format_data): 
+        logger.info(f"Starting processing for {len(clips)} clips with format: {format_data['name']}")
         
-    def start_splitting(self, clips):
-        """Initiates the video splitting process in a QThread."""
-        if not self.source_video_path or not clips:
-            QMessageBox.warning(self, "Error", "Please select a valid video file and add at least one clip.")
-            return
+        # 1. Get paths and configuration
+        video_path = self.video_path 
+        output_folder = self.clipper_panel.output_path_line.text()
+        ffmpeg_path = self.config_data['ffmpeg_paths']['ffmpeg']
+        ffprobe_path = self.config_data['ffmpeg_paths']['ffprobe']
         
+        # 2. Ensure the output folder exists
         try:
-            output_dir = self.clipper_panel.output_path_line.text()
-            if not Path(output_dir).is_absolute():
-                output_dir = str(Path.cwd() / output_dir)
-        except AttributeError:
-            logger.error("Output path line not found in VideoClipperPanel. Using default path.")
-            output_dir = str(Path.cwd() / self.output_folder_name)
+            ensure_folder(output_folder)
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Could not create output directory: {e}")
+            logger.error(f"Failed to create output directory: {e}", exc_info=True)
+            return
             
-        ensure_folder(output_dir)
-        
-        logger.info(f"Starting splitting of {len(clips)} clips into: {output_dir}")
-        
-        # 1. Setup Worker
-        self.splitter_thread = QThread()
-        self.splitter_worker = VideoSplitterWorker(
-            video_path=self.source_video_path,
-            output_folder=output_dir, 
+        # 3. Setup Worker Thread
+        self.thread = QThread()
+        self.worker = VideoSplitterWorker(
+            video_path=video_path,
+            output_folder=output_folder,
             clips=clips,
-            ffprobe_path=self.ffprobe_path,
-            ffmpeg_path=self.ffmpeg_path,
-            app_config=self.config # Passing config
+            ffprobe_path=ffprobe_path, 
+            ffmpeg_path=ffmpeg_path,
+            format_data=format_data, 
+            app_config=self.config_data 
         )
         
-        self.splitter_worker.moveToThread(self.splitter_thread)
-        self.splitter_thread.started.connect(self.splitter_worker.run)
+        self.worker.moveToThread(self.thread)
         
-        # 2. Setup Progress Dialog
+        # 4. Connect signals (FIXED ORDER FOR STABILITY)
+        self.thread.started.connect(self.worker.run)
+        
+        # A. UI Feedback/Operation slots (Must run first: progress updates, error messages, final success message)
+        self.worker.progress.connect(self._update_progress_dialog)
+        self.worker.error.connect(self._handle_worker_error)
+        self.worker.finished.connect(self._processing_finished) 
+        
+        # B. Cleanup slots (Must run after the final UI operation (_processing_finished) returns)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        
+        # 5. Show progress dialog and start
         self.progress_dialog = QProgressDialog(
-            f"Processing clips with FFmpeg into '{Path(output_dir).name}'...", 
+            "Splitting video clips...", 
             "Cancel", 
             0, 
             len(clips), 
             self
         )
-        self.progress_dialog.setWindowTitle("Video Splitter Progress")
+        self.progress_dialog.setWindowTitle("Processing")
         self.progress_dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        self.progress_dialog.setMinimumDuration(0)
-        
-        # 3. Connect Signals
-        self.splitter_worker.progress.connect(self._update_progress_dialog)
-        self.splitter_worker.finished.connect(self._splitting_finished)
-        self.splitter_worker.finished.connect(self.splitter_thread.quit)
-        self.progress_dialog.canceled.connect(self.splitter_worker.stop)
-        self.progress_dialog.canceled.connect(self.splitter_thread.quit)
-        self.splitter_thread.finished.connect(self._cleanup_thread)
-
-        # 4. Start Process
+        self.progress_dialog.setAutoClose(False)
+        self.progress_dialog.canceled.connect(self.worker.stop)
         self.progress_dialog.show()
-        self.splitter_thread.start()
+        
+        self.thread.start()
+        
+    def _update_progress_dialog(self, progress):
+        """Updates the progress dialog with the number of finished clips."""
+        if self.progress_dialog:
+            self.progress_dialog.setValue(progress)
+            self.progress_dialog.setLabelText(f"Processing clip {progress} of {self.progress_dialog.maximum()}...")
 
-    def _update_progress_dialog(self, value):
-        self.progress_dialog.setValue(value)
-        self.progress_dialog.setLabelText(f"Processing clip {value} of {self.progress_dialog.maximum()}...")
+    def _handle_worker_error(self, message):
+        """Handles errors reported by the worker thread."""
+        if self.progress_dialog:
+            self.progress_dialog.close()
+        
+        if self.thread and self.thread.isRunning():
+            self.thread.quit()
+        
+        QMessageBox.critical(self, "Processing Error", message)
+        logger.error(message)
 
-    def _splitting_finished(self, created_files):
-        self.progress_dialog.close()
+    def _processing_finished(self, created_files):
+        """Handles completion of the worker thread."""
+        if self.progress_dialog:
+            self.progress_dialog.close()
         
         if created_files:
+            file_list = "\n".join([str(Path(f).name) for f in created_files])
             QMessageBox.information(
                 self, 
-                "Splitting Complete", 
-                f"Successfully created {len(created_files)} clips in the '{Path(created_files[0]).parent.name}' folder."
+                "Success", 
+                f"Successfully processed {len(created_files)} clips!\nSaved in: {self.clipper_panel.output_path_line.text()}\nFiles:\n{file_list}"
             )
         else:
             QMessageBox.warning(
                 self, 
-                "Splitting Failed", 
-                "No clips were created or the process was cancelled/failed."
+                "Finished", 
+                "Processing finished, but no files were created (possibly cancelled or all failed)."
             )
 
-    def _cleanup_thread(self):
-        """Safely cleans up threads and workers."""
-        if self.splitter_thread:
-            self.splitter_thread.deleteLater()
-            self.splitter_worker.deleteLater()
-            self.splitter_thread = None
-            self.splitter_worker = None
-            
-    def closeEvent(self, event):
-        """Ensure all resources are released upon closing the main window."""
-        self._cleanup_thread()
-        if hasattr(self.clipper_panel, 'player_widget') and self.clipper_panel.player_widget is not None:
-            self.clipper_panel.player_widget.release_player()
-        super().closeEvent(event)
-
-
 # ***************************************************************
-# APPLICATION ENTRY POINT (Fixed location and structure)
+# APPLICATION ENTRY POINT
 # ***************************************************************
 
 if __name__ == '__main__':
     try:
-        # Initialize Application
         app = QApplication(sys.argv)
         
-        # ----------------------------------------------------
-        # Load and Apply External Theme Styling (style.css)
-        # ----------------------------------------------------
         if os.path.exists(STYLE_FILE):
             try:
                 with open(STYLE_FILE, "r") as f:
@@ -279,22 +255,15 @@ if __name__ == '__main__':
                 logger.info(f"Loaded external style sheet: {STYLE_FILE}")
             except Exception as e:
                 logger.error(f"Failed to load style sheet: {e}")
-        # ----------------------------------------------------
         
-        # 1. Load Configuration (using the fixed function)
         config_data = load_config(CONFIG_FILE)
         logger.info("Configuration loaded successfully.")
         
-        # 2. Create the Main Window 
         main_win = MainWindow(config_data)
-        
-        # Show the window 
         main_win.show()
         
-        # 3. Start the main event loop
         sys.exit(app.exec())
         
     except Exception as e:
         logger.critical(f"A critical error occurred during application startup: {e}", exc_info=True)
-        # Exit with a non-zero code to indicate failure
         sys.exit(1)
